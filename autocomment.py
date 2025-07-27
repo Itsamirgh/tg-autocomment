@@ -6,6 +6,7 @@ from flask import Flask
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, ChannelPrivateError
 
+# Load config
 with open("config.json", "r", encoding="utf-8") as f:
     cfg = json.load(f)
 
@@ -14,8 +15,21 @@ api_hash = cfg["api_hash"]
 session_name = cfg["session_name"]
 channels = cfg["channels"]
 
+# Init Telegram client
 client = TelegramClient(session_name, api_id, api_hash)
 
+# Create fake web server to keep Render service alive
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "🤖 Bot is running!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# Handle new messages
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
     comment_text = channels.get(event.chat.username, "🔥 ممنون از پستت!")
@@ -35,26 +49,13 @@ async def comment_on_post(event):
     except Exception as e:
         print(f"❌ خطای ناشناخته: {repr(e)}")
 
-def fake_web_server():
-    app = Flask(__name__)
-
-    @app.route('/')
-    def index():
-        return "🤖 Bot is alive", 200
-
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-async def run_bot():
-    print("🚀 ربات داره لاگین می‌شه…")
+async def start_bot():
+    print("🚀 ربات در حال استارت شدنه…")
     await client.start()
-    print("✅ ربات آنلاین و آماده‌ست")
-    try:
-        await client.run_until_disconnected()
-    except KeyboardInterrupt:
-        print("🛑 در حال قطع اتصال…")
-        await client.disconnect()
+    print("✅ ربات متصل شد")
+    await client.run_until_disconnected()
 
+# Main entry
 if __name__ == "__main__":
-    threading.Thread(target=fake_web_server).start()
-    asyncio.run(run_bot())
+    threading.Thread(target=run_web_server).start()
+    asyncio.run(start_bot())
