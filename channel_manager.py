@@ -26,11 +26,11 @@ def list_channels(channels):
 
 def read_multiline(prompt):
     print(prompt)
-    print("(Enter lines; to finish, enter a single dot `.` on an empty line)")
+    print("(Enter lines; to finish, enter a single comma ',' on an empty line)")
     lines = []
     while True:
         line = input()
-        if line.strip() == ".":
+        if line.strip() == ",":
             break
         lines.append(line)
     return "\n".join(lines)
