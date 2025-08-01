@@ -20,7 +20,7 @@ client = TelegramClient(session_name, api_id, api_hash)
 # Handler for new channel posts
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    comment_text = channels.get(event.chat.username, "🔥 ممنون از پستت!")
+    comment_text = channels.get(event.chat.username, "🚶‍♂️🚶‍♂️🚶‍♂️🚶‍♂️")
     try:
         await asyncio.sleep(1)  # جلوگیری از FloodWait
         await client.send_message(
@@ -29,14 +29,13 @@ async def comment_on_post(event):
             comment_to=event.message.id  # کامنت توی Discussion
         )
         print(f"✅ کامنت ثبت شد زیر پست {event.chat.username}:{event.message.id}")
-
     except FloodWaitError as e:
         print(f"⏰ FloodWait: لطفاً {e.seconds} ثانیه صبر کن…")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
         print("❌ خطا: باید عضو Discussion Group باشی.")
     except Exception as e:
-        print(f"❌ خطای ناشناخته: {repr(e)}")
+        print(f"❌ خطای ناشناخته: {e}")
 
 # Health-check endpoint
 async def handle_health(request):
