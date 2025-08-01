@@ -18,16 +18,16 @@ channels     = cfg["channels"]
 # Initialize Telegram client
 client = TelegramClient(session_name, api_id, api_hash)
 
-# Maintain per-channel state: count of seen posts & current index in messages list
-state = {}
-for username in channels:
-    state[username] = { "count": 0, "index": 0 }
+# Per-channel state
+state = { username: {"count": 0, "index": 0} for username in channels }
 
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    username = event.chat.username
-    cfg_val = channels[username]
+    username = event.chat.username or event.chat.id
+    # Debug log: show we received a new post
+    print(f"🔔 New post from channel {username}, message id {event.message.id}")
 
+    cfg_val = channels[username]
     # determine messages list and frequency
     if isinstance(cfg_val, dict):
         messages = cfg_val.get("messages", [])
@@ -36,23 +36,24 @@ async def comment_on_post(event):
         messages = [cfg_val]
         freq     = 1
 
-    # increment seen counter
     st = state[username]
     st["count"] += 1
 
-    # skip unless this is the Nth post
+    # Only act on every freq-th post
     if st["count"] % freq != 0:
+        print(f"⏭ Skipping (#{st['count']} of freq {freq})")
         return
 
-    # pick next message in rotation
+    # Cycle through messages
     idx = st["index"] % len(messages)
     text = messages[idx]
     st["index"] += 1
 
     try:
         await asyncio.sleep(1)  # avoid FloodWait
+        # send comment to the channel
         await client.send_message(
-            entity=event.chat,
+            entity=username,
             message=text,
             comment_to=event.message.id
         )
@@ -61,26 +62,25 @@ async def comment_on_post(event):
         print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
-        print("❌ Error: join the discussion group first.")
+        print("❌ Error: join the channel's Discussion Group first.")
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
 
-# Health-check endpoint for Render.com / cron-job
+# Health-check endpoint
 async def handle_health(request):
     return web.Response(text="OK")
 
 async def main():
+    # HTTP health-check
     port = int(os.environ.get("PORT", 8080))
-    # start HTTP server
     app = web.Application()
     app.router.add_get("/health", handle_health)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
     print(f"🌐 Health on http://0.0.0.0:{port}/health")
 
-    # start Telegram bot
+    # Start Telegram bot
     print("🚀 Bot starting…")
     await client.start()
     print("✅ Bot is online")

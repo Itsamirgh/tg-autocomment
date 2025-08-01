@@ -5,8 +5,9 @@
   "channels": {
     "test3pppp": {
       "messages": [
-        "تست میکنیم . . . ",
-        ", انجام شد"
+        "ggg",
+        ",123",
+        ",عجب"
       ],
       "frequency": 2
     }

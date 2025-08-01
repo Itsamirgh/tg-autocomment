@@ -23,10 +23,10 @@ def list_channels(channels):
             if isinstance(cfg_val, dict):
                 msgs = cfg_val.get("messages", [])
                 freq = cfg_val.get("frequency", 1)
-                preview = "; ".join(msgs)[:40] + ("…" if len(msgs)>1 else "")
-                print(f"  {i}. {ch} → [x{freq}] {preview}")
+                preview = "; ".join(msgs)
+                print(f"  {i}. {ch} → [every {freq}th] {preview}")
             else:
-                print(f"  {i}. {ch} → {cfg_val[:40]}")
+                print(f"  {i}. {ch} → {cfg_val}")
 
 def read_multiline(prompt):
     print(prompt)
