@@ -1,8 +1,13 @@
 import asyncio
 import json
 import os
-import re
 from telethon import TelegramClient, events
+from telethon.tl.types import (
+    MessageEntityUrl,
+    MessageEntityTextUrl,
+    MessageEntityMention,
+    MessageEntityMentionName
+)
 from telethon.errors import FloodWaitError, ChannelPrivateError
 from aiohttp import web
 
@@ -13,40 +18,61 @@ with open("config.json", "r", encoding="utf-8") as f:
 api_id       = cfg["api_id"]
 api_hash     = cfg["api_hash"]
 session_name = cfg["session_name"]
-# channels: username -> string or { "messages": [...], "frequency": N }
-channels     = cfg["channels"]
+channels     = cfg["channels"]  # username -> dict or string
+
+# Whitelisted external links (substrings)
+ALLOWED_LINKS = [
+    "t.me/ironetbot",
+    "akharinkhabar.ir",
+    "t.me/nikotinn_text",
+]
 
 client = TelegramClient(session_name, api_id, api_hash)
-state = { u: {"count": 0, "index": 0} for u in channels }
 
-# Domain‐like pattern (e.g. example.com, sub.domain.org)
-DOMAIN_REGEX = re.compile(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b")
+# track per-channel post count & rotation index
+state = {username: {"count": 0, "index": 0} for username in channels}
 
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    username     = event.chat.username.lower()
-    text_content = (event.message.message or "").lower()
+    username = event.chat.username.lower()
+    msg      = event.message
+    text     = (msg.message or "").lower()
 
-    # 1) Mentions of other users
-    for m in re.findall(r"@([A-Za-z0-9_]+)", text_content):
-        if m.lower() != username:
-            print(f"🚫 Skipping (mention @{m})")
+    # === promotional filter ===
+
+    # 1) filter any URL entity pointing outside your channel,
+    #    but allow if it matches any ALLOWED_LINKS substring
+    for ent in msg.entities or []:
+        if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl)):
+            url = ent.url if hasattr(ent, 'url') else text[ent.offset:ent.offset + ent.length]
+            url_lower = url.lower()
+            if username in url_lower:
+                continue
+            if any(allowed in url_lower for allowed in ALLOWED_LINKS):
+                continue
+            print(f"🚫 Skipping (external link {url})")
             return
 
-    # 2) URLs with http/https
-    for url in re.findall(r"https?://\S+", text_content):
-        if username not in url:
-            print(f"🚫 Skipping (URL {url})")
+    # 2) filter any @mention of other usernames
+    for ent in msg.entities or []:
+        if isinstance(ent, MessageEntityMention):
+            mention = text[ent.offset+1:ent.offset+ent.length]
+            if mention.lower() == username:
+                continue
+            print(f"🚫 Skipping (mention @{mention})")
             return
 
-    # 3) Domain‐like tokens (e.g. example.com, instagram.com, t.me)
-    for dom in DOMAIN_REGEX.findall(text_content):
-        # if domain is exactly your channel’s username + .com etc, allow:
-        if dom != f"{username}.com" and dom != f"{username}.ir":
-            print(f"🚫 Skipping (domain {dom})")
+    # 3) filter any “hidden” mention by user ID
+    for ent in msg.entities or []:
+        if isinstance(ent, MessageEntityMentionName):
+            # ent.user_id is the target user; skip if it's not your bot/channel
+            # here we simply skip all hidden mentions that aren't to self
+            # can expand with a whitelist of user_ids if needed
+            print(f"🚫 Skipping (hidden mention user_id={ent.user_id})")
             return
 
-    # === comment logic ===
+    # === comment rotation logic ===
+
     cfg_val = channels[event.chat.username]
     if isinstance(cfg_val, dict):
         messages = cfg_val["messages"]
@@ -62,31 +88,32 @@ async def comment_on_post(event):
         return
 
     idx = st["index"] % len(messages)
-    reply_text = messages[idx]
+    reply = messages[idx]
     st["index"] += 1
 
     try:
         await asyncio.sleep(1)
         await client.send_message(
             entity=event.chat.username,
-            message=reply_text,
-            comment_to=event.message.id
+            message=reply,
+            comment_to=msg.id
         )
-        print(f"✅ Commented on {event.chat.username}:{event.message.id}")
+        print(f"✅ Commented on {username}:{msg.id}")
     except FloodWaitError as e:
         print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
-        print("❌ Join the Discussion Group first.")
+        print("❌ Join the discussion group first.")
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
 
+# Health-check endpoint
 async def handle_health(request):
     return web.Response(text="OK")
 
 async def main():
     port = int(os.environ.get("PORT", 8080))
-    app = web.Application()
+    app  = web.Application()
     app.router.add_get("/health", handle_health)
     runner = web.AppRunner(app)
     await runner.setup()
