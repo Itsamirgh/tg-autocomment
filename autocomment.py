@@ -19,52 +19,47 @@ api_hash     = cfg["api_hash"]
 session_name = cfg["session_name"]
 channels     = cfg["channels"]
 
-ALLOWED_LINKS = [
-    "t.me/ironetbot",
-    "akharinkhabar.ir",
-    "t.me/nikotinn_text",
-]
-ALLOWED_MENTIONS = [
-    "akhbartelfori",
-]
-ALLOWED_PROXY_SUBSTR = [
-    "proxy?server=",
-]
+ALLOWED_LINKS        = ["t.me/ironetbot", "akharinkhabar.ir", "t.me/nikotinn_text"]
+ALLOWED_MENTIONS     = ["akhbartelfori"]
+ALLOWED_PROXY_SUBSTR = ["proxy?server="]
 
 client = TelegramClient(session_name, api_id, api_hash)
-state = {username: {"count": 0, "index": 0} for username in channels}
+state  = {key: {"count": 0, "index": 0} for key in channels}
 
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    username = event.chat.username.lower()
-    msg      = event.message
-    text     = (msg.message or "").lower()
+    raw      = event.message.message or ""
+    key      = event.chat.username or str(event.chat.id)
+    cfg_val  = channels.get(key)
+    if not cfg_val:
+        return
 
-    for ent in msg.entities or []:
-        if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl)):
-            url = ent.url if hasattr(ent, 'url') else text[ent.offset:ent.offset + ent.length]
+    # URL filtering
+    for ent in event.message.entities or []:
+        if isinstance(ent, (MessageEntityTextUrl, MessageEntityUrl)):
+            if isinstance(ent, MessageEntityTextUrl):
+                url = ent.url
+            else:
+                url = raw[ent.offset : ent.offset + ent.length]
             ul = url.lower()
-            if username in ul or any(a in ul for a in ALLOWED_LINKS) or any(p in ul for p in ALLOWED_PROXY_SUBSTR):
-                print(f"🔗 Allowed link: {url}")
+            if key in ul or any(a in ul for a in ALLOWED_LINKS) or any(p in ul for p in ALLOWED_PROXY_SUBSTR):
                 continue
-            print(f"🚫 Skipping (external link {url})")
             return
 
-    for ent in msg.entities or []:
+    # @mention filtering
+    for ent in event.message.entities or []:
         if isinstance(ent, MessageEntityMention):
-            m = text[ent.offset+1:ent.offset+ent.length]
-            if m.lower() == username or m.lower() in ALLOWED_MENTIONS:
-                print(f"🔔 Allowed mention: @{m}")
+            mention = raw[ent.offset + 1 : ent.offset + ent.length].lower()
+            if mention == key or mention in ALLOWED_MENTIONS:
                 continue
-            print(f"🚫 Skipping (mention @{m})")
             return
 
-    for ent in msg.entities or []:
+    # hidden mention filtering
+    for ent in event.message.entities or []:
         if isinstance(ent, MessageEntityMentionName):
-            print(f"🚫 Skipping (hidden mention user_id={ent.user_id})")
             return
 
-    cfg_val = channels[event.chat.username]
+    # comment rotation
     if isinstance(cfg_val, dict):
         messages = cfg_val["messages"]
         freq     = cfg_val.get("frequency", 1)
@@ -72,13 +67,12 @@ async def comment_on_post(event):
         messages = [cfg_val]
         freq     = 1
 
-    st = state[event.chat.username]
+    st = state[key]
     st["count"] += 1
     if st["count"] % freq != 0:
-        print(f"⏭ Skipping #{st['count']} (freq={freq})")
         return
 
-    idx = st["index"] % len(messages)
+    idx   = st["index"] % len(messages)
     reply = messages[idx]
     st["index"] += 1
 
@@ -87,11 +81,10 @@ async def comment_on_post(event):
         await client.send_message(
             entity=event.chat.username,
             message=reply,
-            comment_to=msg.id
+            comment_to=event.message.id
         )
-        print(f"✅ Commented on {username}:{msg.id} -> {reply}")
+        print(f"✅ Commented on {key}:{event.message.id} -> {reply}")
     except FloodWaitError as e:
-        print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
         print("❌ Join the discussion group first.")
@@ -103,17 +96,16 @@ async def handle_health(request):
 
 async def main():
     port = int(os.environ.get("PORT", 8080))
+    await client.start()
+    print("✅ Bot is online")
     app  = web.Application()
     app.router.add_get("/health", handle_health)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
     print(f"🌐 Health on http://0.0.0.0:{port}/health")
-
-    print("🚀 Bot starting…")
-    await client.start()
-    print("✅ Bot is online")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
