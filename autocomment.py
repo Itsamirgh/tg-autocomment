@@ -30,11 +30,34 @@ ALLOWED_LINKS = [
     "🚀 فیلترشکن 🚀",
     "فیلترشکن",
     "پروکسی",
+    "proxy?server",
+    "t.me/proxy",
 ]
 
 # optional: extra allowed mentions (lowercase, without @) — add usernames here if needed
 ALLOWED_MENTIONS = {
-    "akhbartelfori",  # example you asked earlier
+    "akhbartelfori",
+    "akharinkhabar",
+    "twite_hub",
+    "radiokocsher",
+    "pastwrize",
+    "teen_text",
+    "fucktwit",
+    "nikotiinn_text",
+    "krolejudg",
+    "angizeh_club",
+    "minionshot",
+    "khabar_fouri",
+    "akhbare_fouri",
+    "proxyhagh",
+    "kosinuse",
+    "badcandom",
+    "kodex",
+    "khateirat",
+    "shakhnews",
+    "alonews",
+    "oqolmoqol",
+    "angizeh_konkore",
 }
 
 client = TelegramClient(session_name, api_id, api_hash)
@@ -96,17 +119,66 @@ def token_matches_channel(token: str, channel_username: str) -> bool:
         return True
     return False
 
+def expand_url_token(token: str, orig_text: str, raw_text: str):
+    """
+    Try to find a longer/correct domain/url in orig_text/raw_text that contains token.
+    Returns the best candidate (normalized) or original token if nothing found.
+    """
+    tok = norm_token(token)
+    candidates = []
+    # check MessageEntityTextUrl-like patterns via TME_RE and DOMAIN_RE on raw_text (cleaned)
+    for m in TME_RE.findall(raw_text):
+        candidates.append(norm_token(m))
+    for m in DOMAIN_RE.findall(raw_text):
+        candidates.append(norm_token(m))
+    # Also search orig_text (un-cleaned) for domain-like substrings
+    for m in DOMAIN_RE.findall(orig_text):
+        candidates.append(norm_token(m))
+    # choose best candidate that contains tok or where tok is suffix
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return tok
+    # prefer exact match
+    for c in candidates:
+        if tok == c:
+            return c
+    # prefer candidate that endswith tok or contains tok
+    for c in sorted(candidates, key=lambda x: -len(x)):
+        if tok in c or c in tok:
+            return c
+    return tok
+
+def expand_mention_token(token: str, orig_text: str, raw_text: str):
+    """
+    Try to recover full mention from orig_text/raw_text if token is truncated.
+    """
+    tok = norm_username(token)
+    mentions = []
+    # find @mentions in orig_text and raw_text
+    for m in MENTION_RE.findall(orig_text):
+        mentions.append(norm_username(m))
+    for m in MENTION_RE.findall(raw_text):
+        mentions.append(norm_username(m))
+    if not mentions:
+        return tok
+    mentions = list(dict.fromkeys(mentions))  # dedupe preserving order
+    # exact or substring match
+    for m in mentions:
+        if tok == m:
+            return m
+    for m in mentions:
+        if tok in m or m in tok:
+            return m
+    # fallback: longest mention
+    return mentions[0]
+
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    # channel key might be username or id; we assume username keys in config
     channel_key = event.chat.username
     channel_username = (channel_key or "").lower()
     msg = event.message
 
-    # IMPORTANT FIX:
-    # offsets/lengths from entities apply to the original text (event.raw_text)
-    # so we keep orig_text for slicing, and use a cleaned raw (ZWSP removed) for regex fallbacks.
-    orig_text = event.raw_text or ""        # use this for slicing with ent.offset/ent.length
+    orig_text = event.raw_text or ""        # use for slicing with ent.offset/ent.length
     raw = remove_zwsp(orig_text)            # cleaned version for regex searches / printing
 
     print("---- new post ----")
@@ -120,32 +192,25 @@ async def comment_on_post(event):
     for ent in msg.entities or []:
         try:
             if isinstance(ent, MessageEntityTextUrl):
-                # this entity has .url which is the destination
                 u = getattr(ent, "url", None)
                 if u:
                     discovered_urls.append(norm_token(u))
                 else:
-                    # fallback slice from ORIGINAL text (use orig_text)
                     discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
             elif isinstance(ent, MessageEntityUrl):
-                # For bare URL entity, slice from ORIGINAL text (works in most cases)
                 try:
                     discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
                 except Exception:
-                    # final fallback stringify
                     discovered_urls.append(norm_token(getattr(ent, "url", "") or str(ent)))
             elif isinstance(ent, MessageEntityMention):
-                # try to grab the mention text; often it's like '@username'
                 try:
-                    snippet = orig_text[ent.offset: ent.offset + ent.length]   # <-- use orig_text here
+                    snippet = orig_text[ent.offset: ent.offset + ent.length]
                     m = MENTION_RE.search(snippet)
                     if m:
                         discovered_mentions.append(norm_username(m.group(0)))
                     else:
-                        # fallback whole snippet (strip @)
                         discovered_mentions.append(norm_username(snippet))
                 except Exception:
-                    # last fallback: stringify
                     discovered_mentions.append(norm_username(str(ent)))
             elif isinstance(ent, MessageEntityMentionName):
                 hidden_mention_found = True
@@ -162,6 +227,18 @@ async def comment_on_post(event):
     # 3) Regex fallback for mentions (any @username in cleaned raw text)
     for m in MENTION_RE.findall(raw):
         discovered_mentions.append(m.lower())
+
+    # attempt to expand/truthify tokens using orig_text/raw
+    expanded_urls = []
+    for u in discovered_urls:
+        expanded = expand_url_token(u, orig_text, raw)
+        expanded_urls.append(expanded)
+    discovered_urls = expanded_urls
+
+    expanded_mentions = []
+    for m in discovered_mentions:
+        expanded = expand_mention_token(m, orig_text, raw)
+        expanded_mentions.append(expanded)
 
     # dedupe preserving order
     def dedupe(seq):
@@ -180,8 +257,6 @@ async def comment_on_post(event):
     print("discovered_mentions:", discovered_mentions)
     if hidden_mention_found:
         print("Note: hidden mention entity present -> will SKIP")
-
-    if hidden_mention_found:
         print("SKIP: hidden mention entity")
         return
 
@@ -201,13 +276,21 @@ async def comment_on_post(event):
             return
 
     # decide about mentions: any mention that is not channel or allowed -> skip
+    cu_norm = re.sub(r'[^a-z0-9_]', '', (channel_username or "").lower())
     for m in discovered_mentions:
-        m_norm = re.sub(r'[^a-z0-9_]', '', m.lower())
+        m_norm = re.sub(r'[^a-z0-9_]', '', (m or "").lower())
         allowed = False
-        if channel_username and (m_norm == channel_username or token_matches_channel(m_norm, channel_username)):
-            allowed = True
-        if not allowed and m_norm in ALLOWED_MENTIONS:
-            allowed = True
+        if cu_norm:
+            if m_norm == cu_norm or cu_norm in m_norm or m_norm in cu_norm or token_matches_channel(m_norm, cu_norm):
+                allowed = True
+        if not allowed:
+            for a in ALLOWED_MENTIONS:
+                a_norm = re.sub(r'[^a-z0-9_]', '', a.lower())
+                if not a_norm:
+                    continue
+                if a_norm == m_norm or a_norm in m_norm or m_norm in a_norm:
+                    allowed = True
+                    break
         print(f" Mention token: {m!r} -> allowed={allowed}")
         if not allowed:
             print(" => external mention found -> SKIP")
