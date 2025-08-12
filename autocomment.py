@@ -102,7 +102,12 @@ async def comment_on_post(event):
     channel_key = event.chat.username
     channel_username = (channel_key or "").lower()
     msg = event.message
-    raw = remove_zwsp(event.raw_text or "")  # normalized raw text
+
+    # IMPORTANT FIX:
+    # offsets/lengths from entities apply to the original text (event.raw_text)
+    # so we keep orig_text for slicing, and use a cleaned raw (ZWSP removed) for regex fallbacks.
+    orig_text = event.raw_text or ""        # use this for slicing with ent.offset/ent.length
+    raw = remove_zwsp(orig_text)            # cleaned version for regex searches / printing
 
     print("---- new post ----")
     print("channel_key:", channel_key)
@@ -120,19 +125,19 @@ async def comment_on_post(event):
                 if u:
                     discovered_urls.append(norm_token(u))
                 else:
-                    # fallback slice
-                    discovered_urls.append(norm_token(raw[ent.offset: ent.offset + ent.length]))
+                    # fallback slice from ORIGINAL text (use orig_text)
+                    discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
             elif isinstance(ent, MessageEntityUrl):
-                # For bare URL entity, slice from raw (works in most cases)
+                # For bare URL entity, slice from ORIGINAL text (works in most cases)
                 try:
-                    discovered_urls.append(norm_token(raw[ent.offset: ent.offset + ent.length]))
+                    discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
                 except Exception:
                     # final fallback stringify
                     discovered_urls.append(norm_token(getattr(ent, "url", "") or str(ent)))
             elif isinstance(ent, MessageEntityMention):
                 # try to grab the mention text; often it's like '@username'
                 try:
-                    snippet = raw[ent.offset: ent.offset + ent.length]
+                    snippet = orig_text[ent.offset: ent.offset + ent.length]   # <-- use orig_text here
                     m = MENTION_RE.search(snippet)
                     if m:
                         discovered_mentions.append(norm_username(m.group(0)))
@@ -148,13 +153,13 @@ async def comment_on_post(event):
         except Exception as e:
             print("entity-extract-exc:", repr(e))
 
-    # 2) Regex fallback on raw text for URLs and t.me
+    # 2) Regex fallback on cleaned raw text for URLs and t.me
     for m in TME_RE.findall(raw):
         discovered_urls.append(norm_token(m))
     for dom in DOMAIN_RE.findall(raw):
         discovered_urls.append(norm_token(dom))
 
-    # 3) Regex fallback for mentions (any @username in text)
+    # 3) Regex fallback for mentions (any @username in cleaned raw text)
     for m in MENTION_RE.findall(raw):
         discovered_mentions.append(m.lower())
 
