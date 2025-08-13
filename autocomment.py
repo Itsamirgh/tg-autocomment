@@ -3,6 +3,7 @@ import json
 import os
 import re
 from urllib.parse import urlparse
+import traceback
 from telethon import TelegramClient, events
 from telethon.tl.types import (
     MessageEntityUrl,
@@ -122,6 +123,7 @@ def token_matches_channel(token: str, channel_username: str) -> bool:
 def expand_url_token(token: str, orig_text: str, raw_text: str):
     tok = norm_token(token)
     candidates = []
+    # collect possible full tokens from raw/orig using regex matches
     for m in TME_RE.findall(raw_text):
         candidates.append(norm_token(m))
     for m in DOMAIN_RE.findall(raw_text):
@@ -131,9 +133,11 @@ def expand_url_token(token: str, orig_text: str, raw_text: str):
     candidates = [c for c in candidates if c]
     if not candidates:
         return tok
+    # exact match
     for c in candidates:
         if tok == c:
             return c
+    # prefer longest match that contains tok
     for c in sorted(candidates, key=lambda x: -len(x)):
         if tok in c or c in tok:
             return c
@@ -148,6 +152,7 @@ def expand_mention_token(token: str, orig_text: str, raw_text: str):
         mentions.append(norm_username(m))
     if not mentions:
         return tok
+    # dedupe order-preserving
     mentions = list(dict.fromkeys(mentions))
     for m in mentions:
         if tok == m:
@@ -202,6 +207,7 @@ async def comment_on_post(event):
         except Exception as e:
             print("entity-extract-exc:", repr(e))
 
+    # regex fallbacks
     for m in TME_RE.findall(raw):
         discovered_urls.append(norm_token(m))
     for dom in DOMAIN_RE.findall(raw):
@@ -209,10 +215,11 @@ async def comment_on_post(event):
     for m in MENTION_RE.findall(raw):
         discovered_mentions.append(m.lower())
 
-    # expand tokens (try to recover truncated ones)
+    # expand tokens to try recover truncated ones
     discovered_urls = [expand_url_token(u, orig_text, raw) for u in discovered_urls]
     discovered_mentions = [expand_mention_token(m, orig_text, raw) for m in discovered_mentions]
 
+    # dedupe preserving order
     def dedupe(seq):
         seen = set()
         out = []
@@ -232,6 +239,7 @@ async def comment_on_post(event):
         print("SKIP: hidden mention entity")
         return
 
+    # decide about URLs: any external (not allowed, not channel) => skip
     for u in discovered_urls:
         allowed = False
         u_norm = norm_token(u)
@@ -246,6 +254,7 @@ async def comment_on_post(event):
             print(" => external URL found -> SKIP")
             return
 
+    # decide about mentions: any mention that is not channel or allowed -> skip
     cu_norm = re.sub(r'[^a-z0-9_]', '', (channel_username or "").lower())
     for m in discovered_mentions:
         m_norm = re.sub(r'[^a-z0-9_]', '', (m or "").lower())
@@ -287,7 +296,6 @@ async def comment_on_post(event):
             cfg_val = channels[k]
             break
     if cfg_val is None:
-        # final fallback: try using lowercased username key
         cfg_val = channels.get(channel_username) or channels.get(channel_key)
     if cfg_val is None:
         print("❌ No config entry for this channel (checked keys):", possible_keys)
@@ -300,7 +308,6 @@ async def comment_on_post(event):
         messages = [cfg_val]
         freq = 1
 
-    # ensure we have at least one non-empty message
     messages = [m for m in messages if m and str(m).strip() != ""]
     if not messages:
         print("❌ No non-empty messages configured for this channel -> SKIP")
@@ -320,16 +327,54 @@ async def comment_on_post(event):
     reply = messages[idx]
     st["index"] += 1
 
-    # final send: use event.chat as entity (safer), fallback to id/username strings
-    target_entity = event.chat
+    # final send: try robust entity resolution and keep detailed logs
+    target_entity = None
+    try:
+        # prefer event.chat if present
+        if getattr(event, "chat", None) is not None:
+            target_entity = event.chat
+    except Exception:
+        target_entity = None
+
+    # if not present, try get_entity on likely keys
     if target_entity is None:
-        # fallback guesses
+        tried = []
+        candidates = []
         if channel_key:
-            target_entity = channel_key
-        elif channel_username:
-            target_entity = channel_username
-        else:
-            target_entity = getattr(event.chat, "id", None)
+            candidates.append(channel_key)
+        if channel_username and channel_username != channel_key:
+            candidates.append(channel_username)
+        try:
+            cid = getattr(event.chat, "id", None)
+            if cid:
+                candidates.append(cid)
+        except Exception:
+            pass
+        for cand in candidates:
+            if cand is None:
+                continue
+            tried.append(cand)
+            try:
+                target_entity = await client.get_entity(cand)
+                print("Resolved target_entity via get_entity():", cand)
+                break
+            except Exception as e:
+                print(f"resolve-candidate-failed: {cand} -> {type(e).__name__}: {e}")
+                target_entity = None
+
+    # fallback to raw id
+    if target_entity is None:
+        try:
+            raw_id = getattr(event.chat, "id", None)
+            if raw_id:
+                target_entity = raw_id
+                print("Fallback to raw id for entity:", raw_id)
+        except Exception:
+            pass
+
+    if target_entity is None:
+        print("❌ Could not resolve any valid entity to send message.")
+        return
 
     try:
         await asyncio.sleep(1)
@@ -342,12 +387,10 @@ async def comment_on_post(event):
         print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
-        print("❌ Join the discussion group first.")
+        print("❌ ChannelPrivateError: join the discussion group / need discussion enabled.")
     except Exception as e:
-        # print full exception for debugging
-        import traceback
         traceback.print_exc()
-        print("❌ Unexpected error:", repr(e))
+        print("❌ Unexpected send error:", type(e).__name__, str(e))
 
 # Health
 async def handle_health(request):
