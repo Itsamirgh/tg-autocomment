@@ -120,56 +120,41 @@ def token_matches_channel(token: str, channel_username: str) -> bool:
     return False
 
 def expand_url_token(token: str, orig_text: str, raw_text: str):
-    """
-    Try to find a longer/correct domain/url in orig_text/raw_text that contains token.
-    Returns the best candidate (normalized) or original token if nothing found.
-    """
     tok = norm_token(token)
     candidates = []
-    # check MessageEntityTextUrl-like patterns via TME_RE and DOMAIN_RE on raw_text (cleaned)
     for m in TME_RE.findall(raw_text):
         candidates.append(norm_token(m))
     for m in DOMAIN_RE.findall(raw_text):
         candidates.append(norm_token(m))
-    # Also search orig_text (un-cleaned) for domain-like substrings
     for m in DOMAIN_RE.findall(orig_text):
         candidates.append(norm_token(m))
-    # choose best candidate that contains tok or where tok is suffix
     candidates = [c for c in candidates if c]
     if not candidates:
         return tok
-    # prefer exact match
     for c in candidates:
         if tok == c:
             return c
-    # prefer candidate that endswith tok or contains tok
     for c in sorted(candidates, key=lambda x: -len(x)):
         if tok in c or c in tok:
             return c
     return tok
 
 def expand_mention_token(token: str, orig_text: str, raw_text: str):
-    """
-    Try to recover full mention from orig_text/raw_text if token is truncated.
-    """
     tok = norm_username(token)
     mentions = []
-    # find @mentions in orig_text and raw_text
     for m in MENTION_RE.findall(orig_text):
         mentions.append(norm_username(m))
     for m in MENTION_RE.findall(raw_text):
         mentions.append(norm_username(m))
     if not mentions:
         return tok
-    mentions = list(dict.fromkeys(mentions))  # dedupe preserving order
-    # exact or substring match
+    mentions = list(dict.fromkeys(mentions))
     for m in mentions:
         if tok == m:
             return m
     for m in mentions:
         if tok in m or m in tok:
             return m
-    # fallback: longest mention
     return mentions[0]
 
 @client.on(events.NewMessage(chats=list(channels.keys())))
@@ -178,8 +163,8 @@ async def comment_on_post(event):
     channel_username = (channel_key or "").lower()
     msg = event.message
 
-    orig_text = event.raw_text or ""        # use for slicing with ent.offset/ent.length
-    raw = remove_zwsp(orig_text)            # cleaned version for regex searches / printing
+    orig_text = event.raw_text or ""
+    raw = remove_zwsp(orig_text)
 
     print("---- new post ----")
     print("channel_key:", channel_key)
@@ -188,7 +173,6 @@ async def comment_on_post(event):
     discovered_mentions = []
     hidden_mention_found = False
 
-    # 1) Prefer MessageEntityTextUrl (contains target url)
     for ent in msg.entities or []:
         try:
             if isinstance(ent, MessageEntityTextUrl):
@@ -218,29 +202,17 @@ async def comment_on_post(event):
         except Exception as e:
             print("entity-extract-exc:", repr(e))
 
-    # 2) Regex fallback on cleaned raw text for URLs and t.me
     for m in TME_RE.findall(raw):
         discovered_urls.append(norm_token(m))
     for dom in DOMAIN_RE.findall(raw):
         discovered_urls.append(norm_token(dom))
-
-    # 3) Regex fallback for mentions (any @username in cleaned raw text)
     for m in MENTION_RE.findall(raw):
         discovered_mentions.append(m.lower())
 
-    # attempt to expand/truthify tokens using orig_text/raw
-    expanded_urls = []
-    for u in discovered_urls:
-        expanded = expand_url_token(u, orig_text, raw)
-        expanded_urls.append(expanded)
-    discovered_urls = expanded_urls
+    # expand tokens (try to recover truncated ones)
+    discovered_urls = [expand_url_token(u, orig_text, raw) for u in discovered_urls]
+    discovered_mentions = [expand_mention_token(m, orig_text, raw) for m in discovered_mentions]
 
-    expanded_mentions = []
-    for m in discovered_mentions:
-        expanded = expand_mention_token(m, orig_text, raw)
-        expanded_mentions.append(expanded)
-
-    # dedupe preserving order
     def dedupe(seq):
         seen = set()
         out = []
@@ -260,7 +232,6 @@ async def comment_on_post(event):
         print("SKIP: hidden mention entity")
         return
 
-    # decide about URLs: any external (not allowed, not channel) => skip
     for u in discovered_urls:
         allowed = False
         u_norm = norm_token(u)
@@ -275,7 +246,6 @@ async def comment_on_post(event):
             print(" => external URL found -> SKIP")
             return
 
-    # decide about mentions: any mention that is not channel or allowed -> skip
     cu_norm = re.sub(r'[^a-z0-9_]', '', (channel_username or "").lower())
     for m in discovered_mentions:
         m_norm = re.sub(r'[^a-z0-9_]', '', (m or "").lower())
@@ -297,13 +267,44 @@ async def comment_on_post(event):
             return
 
     # === comment rotation logic (unchanged) ===
-    cfg_val = channels.get(channel_key) or channels.get(channel_username)
+    # try different keys: username, lowercase username, numeric id strings
+    cfg_val = None
+    possible_keys = []
+    if channel_key:
+        possible_keys.append(channel_key)
+    if channel_username:
+        possible_keys.append(channel_username)
+    try:
+        cid = str(getattr(event.chat, "id", "") or "")
+        if cid:
+            possible_keys.append(cid)
+            if cid.startswith("-100"):
+                possible_keys.append(cid.replace("-100", ""))
+    except Exception:
+        pass
+    for k in possible_keys:
+        if k in channels:
+            cfg_val = channels[k]
+            break
+    if cfg_val is None:
+        # final fallback: try using lowercased username key
+        cfg_val = channels.get(channel_username) or channels.get(channel_key)
+    if cfg_val is None:
+        print("❌ No config entry for this channel (checked keys):", possible_keys)
+        return
+
     if isinstance(cfg_val, dict):
         messages = cfg_val.get("messages", [])
         freq = cfg_val.get("frequency", 1)
     else:
         messages = [cfg_val]
         freq = 1
+
+    # ensure we have at least one non-empty message
+    messages = [m for m in messages if m and str(m).strip() != ""]
+    if not messages:
+        print("❌ No non-empty messages configured for this channel -> SKIP")
+        return
 
     st = state.get(channel_key)
     if st is None:
@@ -319,9 +320,23 @@ async def comment_on_post(event):
     reply = messages[idx]
     st["index"] += 1
 
+    # final send: use event.chat as entity (safer), fallback to id/username strings
+    target_entity = event.chat
+    if target_entity is None:
+        # fallback guesses
+        if channel_key:
+            target_entity = channel_key
+        elif channel_username:
+            target_entity = channel_username
+        else:
+            target_entity = getattr(event.chat, "id", None)
+
     try:
         await asyncio.sleep(1)
-        await client.send_message(entity=channel_key, message=reply, comment_to=msg.id)
+        if not reply or str(reply).strip() == "":
+            print("❌ Reply text empty, skipping send.")
+            return
+        await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
         print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
     except FloodWaitError as e:
         print(f"⏰ FloodWait: wait {e.seconds}s")
@@ -329,7 +344,10 @@ async def comment_on_post(event):
     except ChannelPrivateError:
         print("❌ Join the discussion group first.")
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        # print full exception for debugging
+        import traceback
+        traceback.print_exc()
+        print("❌ Unexpected error:", repr(e))
 
 # Health
 async def handle_health(request):
