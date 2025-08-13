@@ -12,7 +12,6 @@ from telethon.tl.types import (
     MessageEntityMentionName
 )
 from telethon.errors import FloodWaitError, ChannelPrivateError
-from telethon.errors import common as telethon_common
 from aiohttp import web
 
 # Load settings
@@ -97,10 +96,8 @@ def token_matches_channel(token: str, channel_username: str) -> bool:
     cu = channel_username.lower()
     cu_basic = re.sub(r'[^A-Za-z0-9_]', '', cu)
     tok = token.strip().lower()
-    # direct substring
     if cu in tok:
         return True
-    # parse domain-like tokens
     try:
         if not tok.startswith(("http://", "https://")):
             parsed = urlparse("http://" + tok)
@@ -124,7 +121,6 @@ def token_matches_channel(token: str, channel_username: str) -> bool:
 def expand_url_token(token: str, orig_text: str, raw_text: str):
     tok = norm_token(token)
     candidates = []
-    # collect possible full tokens from raw/orig using regex matches
     for m in TME_RE.findall(raw_text):
         candidates.append(norm_token(m))
     for m in DOMAIN_RE.findall(raw_text):
@@ -134,11 +130,9 @@ def expand_url_token(token: str, orig_text: str, raw_text: str):
     candidates = [c for c in candidates if c]
     if not candidates:
         return tok
-    # exact match
     for c in candidates:
         if tok == c:
             return c
-    # prefer longest match that contains tok
     for c in sorted(candidates, key=lambda x: -len(x)):
         if tok in c or c in tok:
             return c
@@ -153,7 +147,6 @@ def expand_mention_token(token: str, orig_text: str, raw_text: str):
         mentions.append(norm_username(m))
     if not mentions:
         return tok
-    # dedupe order-preserving
     mentions = list(dict.fromkeys(mentions))
     for m in mentions:
         if tok == m:
@@ -165,243 +158,228 @@ def expand_mention_token(token: str, orig_text: str, raw_text: str):
 
 @client.on(events.NewMessage(chats=list(channels.keys())))
 async def comment_on_post(event):
-    try:
-        channel_key = event.chat.username
-        channel_username = (channel_key or "").lower()
-        msg = event.message
+    channel_key = event.chat.username
+    channel_username = (channel_key or "").lower()
+    msg = event.message
 
-        orig_text = event.raw_text or ""
-        raw = remove_zwsp(orig_text)
+    orig_text = event.raw_text or ""
+    raw = remove_zwsp(orig_text)
 
-        print("---- new post ----")
-        print("channel_key:", channel_key)
+    print("---- new post ----")
+    print("channel_key:", channel_key)
 
-        discovered_urls = []
-        discovered_mentions = []
-        hidden_mention_found = False
+    discovered_urls = []
+    discovered_mentions = []
+    hidden_mention_found = False
 
-        for ent in msg.entities or []:
-            try:
-                if isinstance(ent, MessageEntityTextUrl):
-                    u = getattr(ent, "url", None)
-                    if u:
-                        discovered_urls.append(norm_token(u))
+    for ent in msg.entities or []:
+        try:
+            if isinstance(ent, MessageEntityTextUrl):
+                u = getattr(ent, "url", None)
+                if u:
+                    discovered_urls.append(norm_token(u))
+                else:
+                    discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
+            elif isinstance(ent, MessageEntityUrl):
+                try:
+                    discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
+                except Exception:
+                    discovered_urls.append(norm_token(getattr(ent, "url", "") or str(ent)))
+            elif isinstance(ent, MessageEntityMention):
+                try:
+                    snippet = orig_text[ent.offset: ent.offset + ent.length]
+                    m = MENTION_RE.search(snippet)
+                    if m:
+                        discovered_mentions.append(norm_username(m.group(0)))
                     else:
-                        discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
-                elif isinstance(ent, MessageEntityUrl):
-                    try:
-                        discovered_urls.append(norm_token(orig_text[ent.offset: ent.offset + ent.length]))
-                    except Exception:
-                        discovered_urls.append(norm_token(getattr(ent, "url", "") or str(ent)))
-                elif isinstance(ent, MessageEntityMention):
-                    try:
-                        snippet = orig_text[ent.offset: ent.offset + ent.length]
-                        m = MENTION_RE.search(snippet)
-                        if m:
-                            discovered_mentions.append(norm_username(m.group(0)))
-                        else:
-                            discovered_mentions.append(norm_username(snippet))
-                    except Exception:
-                        discovered_mentions.append(norm_username(str(ent)))
-                elif isinstance(ent, MessageEntityMentionName):
-                    hidden_mention_found = True
-                    print("Found hidden mention user_id:", getattr(ent, "user_id", None))
-            except Exception as e:
-                print("entity-extract-exc:", repr(e))
+                        discovered_mentions.append(norm_username(snippet))
+                except Exception:
+                    discovered_mentions.append(norm_username(str(ent)))
+            elif isinstance(ent, MessageEntityMentionName):
+                hidden_mention_found = True
+                print("Found hidden mention user_id:", getattr(ent, "user_id", None))
+        except Exception as e:
+            print("entity-extract-exc:", repr(e))
 
-        # regex fallbacks
-        for m in TME_RE.findall(raw):
-            discovered_urls.append(norm_token(m))
-        for dom in DOMAIN_RE.findall(raw):
-            discovered_urls.append(norm_token(dom))
-        for m in MENTION_RE.findall(raw):
-            discovered_mentions.append(m.lower())
+    for m in TME_RE.findall(raw):
+        discovered_urls.append(norm_token(m))
+    for dom in DOMAIN_RE.findall(raw):
+        discovered_urls.append(norm_token(dom))
+    for m in MENTION_RE.findall(raw):
+        discovered_mentions.append(m.lower())
 
-        # expand tokens to try recover truncated ones
-        discovered_urls = [expand_url_token(u, orig_text, raw) for u in discovered_urls]
-        discovered_mentions = [expand_mention_token(m, orig_text, raw) for m in discovered_mentions]
+    discovered_urls = [expand_url_token(u, orig_text, raw) for u in discovered_urls]
+    discovered_mentions = [expand_mention_token(m, orig_text, raw) for m in discovered_mentions]
 
-        # dedupe preserving order
-        def dedupe(seq):
-            seen = set()
-            out = []
-            for x in seq:
-                if x and x not in seen:
-                    seen.add(x)
-                    out.append(x)
-            return out
+    def dedupe(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
 
-        discovered_urls = dedupe(discovered_urls)
-        discovered_mentions = dedupe(discovered_mentions)
+    discovered_urls = dedupe(discovered_urls)
+    discovered_mentions = dedupe(discovered_mentions)
 
-        print("discovered_urls:", discovered_urls)
-        print("discovered_mentions:", discovered_mentions)
-        if hidden_mention_found:
-            print("Note: hidden mention entity present -> will SKIP")
-            print("SKIP: hidden mention entity")
+    print("discovered_urls:", discovered_urls)
+    print("discovered_mentions:", discovered_mentions)
+    if hidden_mention_found:
+        print("Note: hidden mention entity present -> will SKIP")
+        print("SKIP: hidden mention entity")
+        return
+
+    for u in discovered_urls:
+        allowed = False
+        u_norm = norm_token(u)
+        for a in ALLOWED_LINKS:
+            if a.lower() in u_norm:
+                allowed = True
+                break
+        if not allowed and token_matches_channel(u_norm, channel_username):
+            allowed = True
+        print(f" URL token: {u!r} -> allowed={allowed}")
+        if not allowed:
+            print(" => external URL found -> SKIP")
             return
 
-        # decide about URLs: any external (not allowed, not channel) => skip
-        for u in discovered_urls:
-            allowed = False
-            u_norm = norm_token(u)
-            for a in ALLOWED_LINKS:
-                if a.lower() in u_norm:
+    cu_norm = re.sub(r'[^a-z0-9_]', '', (channel_username or "").lower())
+    for m in discovered_mentions:
+        m_norm = re.sub(r'[^a-z0-9_]', '', (m or "").lower())
+        allowed = False
+        if cu_norm:
+            if m_norm == cu_norm or cu_norm in m_norm or m_norm in cu_norm or token_matches_channel(m_norm, cu_norm):
+                allowed = True
+        if not allowed:
+            for a in ALLOWED_MENTIONS:
+                a_norm = re.sub(r'[^a-z0-9_]', '', a.lower())
+                if not a_norm:
+                    continue
+                if a_norm == m_norm or a_norm in m_norm or m_norm in a_norm:
                     allowed = True
                     break
-            if not allowed and token_matches_channel(u_norm, channel_username):
-                allowed = True
-            print(f" URL token: {u!r} -> allowed={allowed}")
-            if not allowed:
-                print(" => external URL found -> SKIP")
-                return
+        print(f" Mention token: {m!r} -> allowed={allowed}")
+        if not allowed:
+            print(" => external mention found -> SKIP")
+            return
 
-        # decide about mentions: any mention that is not channel or allowed -> skip
-        cu_norm = re.sub(r'[^a-z0-9_]', '', (channel_username or "").lower())
-        for m in discovered_mentions:
-            m_norm = re.sub(r'[^a-z0-9_]', '', (m or "").lower())
-            allowed = False
-            if cu_norm:
-                if m_norm == cu_norm or cu_norm in m_norm or m_norm in cu_norm or token_matches_channel(m_norm, cu_norm):
-                    allowed = True
-            if not allowed:
-                for a in ALLOWED_MENTIONS:
-                    a_norm = re.sub(r'[^a-z0-9_]', '', a.lower())
-                    if not a_norm:
-                        continue
-                    if a_norm == m_norm or a_norm in m_norm or m_norm in a_norm:
-                        allowed = True
-                        break
-            print(f" Mention token: {m!r} -> allowed={allowed}")
-            if not allowed:
-                print(" => external mention found -> SKIP")
-                return
+    # === comment rotation logic (unchanged) ===
+    cfg_val = None
+    possible_keys = []
+    if channel_key:
+        possible_keys.append(channel_key)
+    if channel_username:
+        possible_keys.append(channel_username)
+    try:
+        cid = str(getattr(event.chat, "id", "") or "")
+        if cid:
+            possible_keys.append(cid)
+            if cid.startswith("-100"):
+                possible_keys.append(cid.replace("-100", ""))
+    except Exception:
+        pass
+    for k in possible_keys:
+        if k in channels:
+            cfg_val = channels[k]
+            break
+    if cfg_val is None:
+        cfg_val = channels.get(channel_username) or channels.get(channel_key)
+    if cfg_val is None:
+        print("❌ No config entry for this channel (checked keys):", possible_keys)
+        return
 
-        # === comment rotation logic (unchanged) ===
-        # try different keys: username, lowercase username, numeric id strings
-        cfg_val = None
-        possible_keys = []
+    if isinstance(cfg_val, dict):
+        messages = cfg_val.get("messages", [])
+        freq = cfg_val.get("frequency", 1)
+    else:
+        messages = [cfg_val]
+        freq = 1
+
+    messages = [m for m in messages if m and str(m).strip() != ""]
+    if not messages:
+        print("❌ No non-empty messages configured for this channel -> SKIP")
+        return
+
+    st = state.get(channel_key)
+    if st is None:
+        st = {"count": 0, "index": 0}
+        state[channel_key] = st
+
+    st["count"] += 1
+    if st["count"] % freq != 0:
+        print(f"⏭ Skipping #{st['count']} (freq={freq})")
+        return
+
+    idx = st["index"] % len(messages)
+    reply = messages[idx]
+    st["index"] += 1
+
+    # ensure reply isn't empty after removing zero-width chars
+    reply_norm = remove_zwsp(str(reply) or "")
+    if not reply_norm or reply_norm.strip() == "":
+        print("❌ Reply becomes empty after normalization — skipping send.")
+        return
+
+    # final send: robust entity resolution with retries
+    target_entity = None
+    try:
+        if getattr(event, "chat", None) is not None:
+            target_entity = event.chat
+    except Exception:
+        target_entity = None
+
+    if target_entity is None:
+        tried = []
+        candidates = []
         if channel_key:
-            possible_keys.append(channel_key)
-        if channel_username:
-            possible_keys.append(channel_username)
+            candidates.append(channel_key)
+        if channel_username and channel_username != channel_key:
+            candidates.append(channel_username)
         try:
-            cid = str(getattr(event.chat, "id", "") or "")
+            cid = getattr(event.chat, "id", None)
             if cid:
-                possible_keys.append(cid)
-                if cid.startswith("-100"):
-                    possible_keys.append(cid.replace("-100", ""))
+                candidates.append(cid)
         except Exception:
             pass
-        for k in possible_keys:
-            if k in channels:
-                cfg_val = channels[k]
+        for cand in candidates:
+            if cand is None:
+                continue
+            tried.append(cand)
+            try:
+                ent = await client.get_entity(cand)
+                target_entity = ent
+                print("Resolved target_entity via get_entity():", cand)
                 break
-        if cfg_val is None:
-            cfg_val = channels.get(channel_username) or channels.get(channel_key)
-        if cfg_val is None:
-            print("❌ No config entry for this channel (checked keys):", possible_keys)
-            return
+            except Exception as e:
+                print(f"resolve-candidate-failed: {cand} -> {type(e).__name__}: {e}")
+                target_entity = None
 
-        if isinstance(cfg_val, dict):
-            messages = cfg_val.get("messages", [])
-            freq = cfg_val.get("frequency", 1)
-        else:
-            messages = [cfg_val]
-            freq = 1
-
-        messages = [m for m in messages if m and str(m).strip() != ""]
-        if not messages:
-            print("❌ No non-empty messages configured for this channel -> SKIP")
-            return
-
-        st = state.get(channel_key)
-        if st is None:
-            st = {"count": 0, "index": 0}
-            state[channel_key] = st
-
-        st["count"] += 1
-        if st["count"] % freq != 0:
-            print(f"⏭ Skipping #{st['count']} (freq={freq})")
-            return
-
-        idx = st["index"] % len(messages)
-        reply = messages[idx]
-        st["index"] += 1
-
-        # final send: try robust entity resolution and keep detailed logs
-        target_entity = None
+    if target_entity is None:
         try:
-            # prefer event.chat if present
-            if getattr(event, "chat", None) is not None:
-                target_entity = event.chat
+            raw_id = getattr(event.chat, "id", None)
+            if raw_id:
+                target_entity = raw_id
+                print("Fallback to raw id for entity:", raw_id)
         except Exception:
-            target_entity = None
+            pass
 
-        # if not present, try get_entity on likely keys
-        if target_entity is None:
-            tried = []
-            candidates = []
-            if channel_key:
-                candidates.append(channel_key)
-            if channel_username and channel_username != channel_key:
-                candidates.append(channel_username)
-            try:
-                cid = getattr(event.chat, "id", None)
-                if cid:
-                    candidates.append(cid)
-            except Exception:
-                pass
-            for cand in candidates:
-                if cand is None:
-                    continue
-                tried.append(cand)
-                try:
-                    target_entity = await client.get_entity(cand)
-                    print("Resolved target_entity via get_entity():", cand)
-                    break
-                except Exception as e:
-                    print(f"resolve-candidate-failed: {cand} -> {type(e).__name__}: {e}")
-                    target_entity = None
-
-        # fallback to raw id
-        if target_entity is None:
-            try:
-                raw_id = getattr(event.chat, "id", None)
-                if raw_id:
-                    target_entity = raw_id
-                    print("Fallback to raw id for entity:", raw_id)
-            except Exception:
-                pass
-
-        if target_entity is None:
-            print("❌ Could not resolve any valid entity to send message.")
-            return
-
-        try:
-            await asyncio.sleep(1)
-            if not reply or str(reply).strip() == "":
-                print("❌ Reply text empty, skipping send.")
-                return
-            await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
-            print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
-        except FloodWaitError as e:
-            print(f"⏰ FloodWait: wait {e.seconds}s")
-            await asyncio.sleep(e.seconds + 1)
-        except ChannelPrivateError:
-            print("❌ ChannelPrivateError: join the discussion group / need discussion enabled.")
-        except Exception as e:
-            traceback.print_exc()
-            print("❌ Unexpected send error:", type(e).__name__, str(e))
-
-    except telethon_common.TypeNotFoundError as e:
-        print("TypeNotFoundError while processing message:", e)
-        traceback.print_exc()
+    if target_entity is None:
+        print("❌ Could not resolve any valid entity to send message.")
         return
+
+    try:
+        await asyncio.sleep(1)
+        await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
+        print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
+    except FloodWaitError as e:
+        print(f"⏰ FloodWait: wait {e.seconds}s")
+        await asyncio.sleep(e.seconds + 1)
+    except ChannelPrivateError:
+        print("❌ ChannelPrivateError: join the discussion group / need discussion enabled.")
     except Exception as e:
-        print("Unhandled exception in comment_on_post:", type(e).__name__, e)
         traceback.print_exc()
-        return
+        print("❌ Unexpected send error:", type(e).__name__, str(e))
 
 # Health
 async def handle_health(request):
