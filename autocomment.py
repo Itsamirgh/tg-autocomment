@@ -11,10 +11,7 @@ from telethon.tl.types import (
     MessageEntityMention,
     MessageEntityMentionName
 )
-from telethon.tl.functions.messages import GetDiscussionMessageRequest
-from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.errors import FloodWaitError, ChannelPrivateError
-from telethon.errors.rpcerrorlist import MsgIdInvalidError
 from aiohttp import web
 
 # Load settings
@@ -279,29 +276,70 @@ async def comment_on_post(event):
             return
 
     # === comment rotation logic (unchanged) ===
-    # try different keys: username, lowercase username, numeric id strings
+    # robust lookup for channel config entry (replaces previous simple lookup)
     cfg_val = None
-    possible_keys = []
+
+    # build candidate keys to try (various normalizations)
+    candidates = []
     if channel_key:
-        possible_keys.append(channel_key)
+        candidates += [
+            channel_key,
+            channel_key.lower(),
+            channel_key.lstrip("@"),
+            channel_key.lstrip("@").lower()
+        ]
     if channel_username:
-        possible_keys.append(channel_username)
+        candidates += [
+            channel_username,
+            channel_username.lstrip("@"),
+            channel_username.lower(),
+            channel_username.lstrip("@").lower()
+        ]
     try:
-        cid = str(getattr(event.chat, "id", "") or "")
+        cid = getattr(event.chat, "id", None)
         if cid:
-            possible_keys.append(cid)
-            if cid.startswith("-100"):
-                possible_keys.append(cid.replace("-100", ""))
+            candidates += [str(cid), str(cid).lstrip("-100")]
     except Exception:
         pass
-    for k in possible_keys:
-        if k in channels:
-            cfg_val = channels[k]
+
+    # also try normalized username form using norm_username
+    try:
+        cand_norm = norm_username(channel_key) if channel_key else None
+        if cand_norm:
+            candidates.append(cand_norm)
+        cand_norm2 = norm_username(channel_username) if channel_username else None
+        if cand_norm2:
+            candidates.append(cand_norm2)
+    except Exception:
+        pass
+
+    # try candidates in order (dedupe)
+    seen = set()
+    tried = []
+    for k in candidates:
+        if not k:
+            continue
+        kk = str(k)
+        if kk in seen:
+            continue
+        seen.add(kk)
+        tried.append(kk)
+        if kk in channels:
+            cfg_val = channels[kk]
             break
+
+    # final fallback: case-insensitive match against existing keys in channels
     if cfg_val is None:
-        cfg_val = channels.get(channel_username) or channels.get(channel_key)
+        ck_map = {str(k).lower().lstrip("@"): k for k in channels.keys()}
+        lookup_keys = [channel_key or "", channel_username or ""]
+        for lk in lookup_keys:
+            lk_norm = str(lk).lower().lstrip("@")
+            if lk_norm in ck_map:
+                cfg_val = channels[ck_map[lk_norm]]
+                break
+
     if cfg_val is None:
-        print("❌ No config entry for this channel (checked keys):", possible_keys)
+        print("❌ No config entry for this channel (checked keys):", tried)
         return
 
     if isinstance(cfg_val, dict):
@@ -384,72 +422,8 @@ async def comment_on_post(event):
         if not reply or str(reply).strip() == "":
             print("❌ Reply text empty, skipping send.")
             return
-
-        # === Discussion existence check & robust fallback ===
-        try:
-            # Try to fetch discussion message: if this raises MsgIdInvalidError,
-            # the msg.id is not valid for discussion (causes the previous error).
-            await client(GetDiscussionMessageRequest(peer=event.chat, msg_id=msg.id))
-            # if above works, safe to comment_to=msg.id
-            await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
-            print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
-        except MsgIdInvalidError as mie:
-            # message id invalid for discussion — try fallback:
-            print(f"[!] MsgIdInvalidError for msg.id={msg.id}, attempting fallback delivery: {mie}")
-            # try to find linked chat id (discussion chat)
-            linked = getattr(event.chat, "linked_chat_id", None)
-            if not linked:
-                try:
-                    full = await client(GetFullChannelRequest(channel=event.chat))
-                    linked = getattr(full.full_chat, "linked_chat_id", None)
-                except Exception as e:
-                    print("GetFullChannelRequest failed:", type(e).__name__, e)
-                    linked = None
-            if linked:
-                try:
-                    # linked might be an int id; get_entity will resolve it
-                    linked_entity = linked
-                    try:
-                        linked_entity = await client.get_entity(linked)
-                    except Exception:
-                        # leave as id if get_entity fails
-                        linked_entity = linked
-                    await client.send_message(entity=linked_entity, message=reply)
-                    print(f"✅ Fallback: Sent to linked chat {linked} for {channel_username}:{msg.id}")
-                except Exception as e:
-                    print("❌ Fallback send failed:", type(e).__name__, e)
-            else:
-                print("❌ No linked discussion chat found; cannot send comment for this message.")
-            return
-        except Exception as e:
-            # any other exception when checking discussion — print and skip to avoid crashes
-            print("Discussion-check unexpected error:", type(e).__name__, repr(e))
-            # try a safe fallback: send to linked chat if available
-            try:
-                linked = getattr(event.chat, "linked_chat_id", None)
-                if not linked:
-                    try:
-                        full = await client(GetFullChannelRequest(channel=event.chat))
-                        linked = getattr(full.full_chat, "linked_chat_id", None)
-                    except Exception:
-                        linked = None
-                if linked:
-                    try:
-                        linked_entity = linked
-                        try:
-                            linked_entity = await client.get_entity(linked)
-                        except Exception:
-                            linked_entity = linked
-                        await client.send_message(entity=linked_entity, message=reply)
-                        print(f"✅ Fallback-send (after discussion-check error) to linked chat {linked}")
-                    except Exception as e2:
-                        print("Fallback-send failed after discussion-check error:", type(e2).__name__, e2)
-                else:
-                    print("No linked chat found on unexpected discussion-check error; skipping.")
-            except Exception as final_e:
-                print("Final fallback also failed:", type(final_e).__name__, final_e)
-            return
-
+        await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
+        print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
     except FloodWaitError as e:
         print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
