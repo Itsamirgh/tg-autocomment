@@ -12,12 +12,6 @@ from telethon.tl.types import (
     MessageEntityMentionName
 )
 from telethon.errors import FloodWaitError, ChannelPrivateError
-from telethon.errors.rpcerrorlist import (
-    UserBannedInChannelError,
-    MsgIdInvalidError,
-    ChatAdminRequiredError,
-    PeerIdInvalidError,
-)
 from aiohttp import web
 
 # Load settings
@@ -428,42 +422,16 @@ async def comment_on_post(event):
         if not reply or str(reply).strip() == "":
             print("❌ Reply text empty, skipping send.")
             return
-        try:
-            await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
-            print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
-        except MsgIdInvalidError as e_msgid:
-            print("⚠ MsgIdInvalidError: comment_to message id invalid. Trying fallback sends...")
-            # try sending as a plain message to the resolved entity (may land in discussion or channel)
-            try:
-                await client.send_message(entity=target_entity, message=reply)
-                print("✅ Fallback: sent without comment_to to resolved entity.")
-            except Exception as e2:
-                print("❌ Fallback send without comment_to failed:", type(e2).__name__, e2)
-        except UserBannedInChannelError:
-            print("❌ UserBannedInChannelError: the logged-in account is banned from sending in that channel/group. Skipping.")
-            return
-        except ChatAdminRequiredError:
-            print("❌ ChatAdminRequiredError: missing permission to send in this chat. Skipping.")
-            return
-        except PeerIdInvalidError:
-            print("❌ PeerIdInvalidError: resolved peer invalid. Skipping.")
-            return
-        except Exception as exc_send:
-            # generic fallback: if it's a permission/ban issue, log and skip; else print traceback
-            name = type(exc_send).__name__
-            if name in ("UserBannedInChannelError", "ChatAdminRequiredError"):
-                print(f"❌ {name}: skipping")
-                return
-            traceback.print_exc()
-            print("❌ Unexpected send error:", type(exc_send).__name__, str(exc_send))
+        await client.send_message(entity=target_entity, message=reply, comment_to=msg.id)
+        print(f"✅ Commented on {channel_username}:{msg.id} -> {repr(reply)[:120]}")
     except FloodWaitError as e:
         print(f"⏰ FloodWait: wait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except ChannelPrivateError:
-        print("❌ ChannelPrivateError: join the discussion group first.")
+        print("❌ ChannelPrivateError: join the discussion group / need discussion enabled.")
     except Exception as e:
         traceback.print_exc()
-        print("❌ Unexpected error:", repr(e))
+        print("❌ Unexpected send error:", type(e).__name__, str(e))
 
 # Health
 async def handle_health(request):
@@ -479,11 +447,6 @@ async def main():
     print(f"🌐 Health on http://0.0.0.0:{port}/health")
     print("🚀 Bot starting…")
     await client.start()
-    try:
-        me = await client.get_me()
-        print(f"🔑 Logged in as: {getattr(me,'username',None)} ({getattr(me,'id',None)})")
-    except Exception as e:
-        print("⚠ Could not get account info:", repr(e))
     print("✅ Bot is online")
     await client.run_until_disconnected()
 
